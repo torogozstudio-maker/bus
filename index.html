@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BusRuta Santa Ana</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  #map{height:42vh;border-radius:1rem;z-index:0}
+  .card{background:#fff;border-radius:1rem;padding:.75rem 1rem;box-shadow:0 1px 4px #0002}
+  .btn{background:#6d28d9;color:#fff;border-radius:.75rem;padding:.5rem 1rem;font-weight:600}
+  .btn2{background:#ede9fe;color:#5b21b6;border-radius:.75rem;padding:.5rem 1rem;font-weight:600}
+  input,select,textarea{border:1px solid #ddd;border-radius:.75rem;padding:.5rem .75rem;width:100%}
+</style>
+</head>
+<body class="bg-violet-50 text-slate-800 pb-20">
+<header class="p-4 flex items-center gap-2 bg-violet-700 text-white">
+  <span class="text-2xl">🚌</span><h1 class="text-xl font-extrabold">BusRuta <span class="text-yellow-300">Santa Ana</span></h1>
+</header>
+<main class="p-4 max-w-2xl mx-auto space-y-3">
+  <div id="mapbox"><div id="map"></div><div id="mapfail" class="hidden card text-sm"></div></div>
+  <div id="view" class="space-y-3"></div>
+</main>
+<nav class="fixed bottom-0 inset-x-0 z-[1000] bg-white border-t flex justify-around text-xs py-2" id="nav"></nav>
+
+<script>
+/* ============ 1. CONFIG ============ */
+// Mapa: Leaflet + OpenStreetMap (sin API key). Respeta la política de uso de tiles de OSM; para producción usa un proveedor de tiles.
+// Centro SOLO para encuadrar el mapa (aprox. Santa Ana). No es un dato de parada.
+const DEFAULT_CENTER = { lat: 13.9942, lng: -89.5597 };
+const ADMIN_PIN = "1234"; // SIMULADO: cambia esto y usa auth real (Supabase/Firebase) en producción.
+
+/* ============ 2. STORE (persistencia local) ============ */
+// stop:  {id, name, lat, lng, verified}
+// route: {id, name, stops:[stopId en orden], verified}
+// Se inicia VACÍO: no se inventan paradas ni rutas. Cárgalas desde Admin (o importa JSON).
+const Store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem("br_" + k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("br_" + k, JSON.stringify(v)); } catch (e) { alert("No se pudo guardar"); } },
+};
+// Datos iniciales: SOLO origen/destino de rutas, tomados del JSON de investigación.
+// Fuente sin fecha de actualización → todo queda "sin verificar". No hay paradas con coordenadas aún.
+const SEED_SRC = "https://bus.sv/rutas/departamento/sa";
+const SEED_ROUTES = [
+ ["51-A SA Bus","Colonia Altos del Palmar","Colonia IVU"],["51-B SA Bus","Colonia Altos del Palmar","Colonia IVU"],
+ ["51-C SA Bus","Colonia Lamatepec","Colonia España"],["51-D SA Bus","Colonia Río Zarco","Altos del Palmar"],
+ ["51-D 1 SA Bus","Colonia Santa Ana Norte","Colonia Altos del Palmar"],["51-E SA Bus","Colonia Altos del Palmar","Colonia IVU"],
+ ["51-F SA Bus","Colonia El Milagro","Colonia Contexa"],["51-F 1 SA Bus","Colonia Santa Ana Norte","Colonia Contexa"],
+ ["50 SA Bus","Cantón El Salamo","Final del bulevar Los 44"],["55-A SA Bus","Lotificación Ana Linda","Puente Las Pulgas"],
+ ["55-A 1 SA Bus","Lotificación Ana Linda","Caserío El Bejuco"],["55-A 2 SA Bus","Cantón Primaverita","Despensa"],
+ ["55-B SA Bus","Comecayo","Residencial El Trébol"],["55-B 1 SA Bus","Planes del Ranchador","Centro"],
+ ["55-B 2 SA Bus","Cantón Empalizada","Centro"],["55-C SA Bus","Cantón Potrillos Del Matazano","Hospital"],
+ ["55-D SA Bus","Residencial El Trébol","Cantón Potrerillos del Matazano"],["59 SA Bus","Puente El Congo","Centro de Santa Ana"],
+ ["1 SA Micro","Colonia Lamatepec","Colonia Santa María"],["2 SA Micro","Colonia Las Cocinas","Metrocentro (6.ª avenida Sur)"],
+ ["3 SA Micro","Colonia Copinolito","Colonia San Ignacio"],["4 SA Micro","Colonia San José","Colonia Avilés"],
+ ["5 SA Micro","Colonia CEL (cantón Natividad)","Colonia Panades"],["6 SA Micro","Colonia Lomas del Tecana","Colonia San Mauricio"],
+ ["7 SA Micro","Colonia San Carlos","Colonia Río Zarco"],["8 SA Micro","Colonia Altos del Palmar (iglesia Caleb)","Colonia Esmeralda"],
+ ["8 1 SA Micro","Colonia Altos del Palmar (iglesia Caleb)","San Lorenzo"],["8 2 SA Micro","Colonia Altos del Palmar (iglesia Caleb)","Residencial El Molino"],
+ ["9 SA Micro","Colonia San Luis","Urbanización El Trébol"],["10 SA Micro","Colonia Santa Eduviges","Colonia 5 de Marzo"],
+ ["12 SA Micro","Colonia Nueva San Juan","Colonia El Progreso"],["13 SA Micro","Colonia Buena Vista","Colonia Los Olivos"],
+].map(([name, origen, destino], i) => ({ id: "r_seed" + i, name, origen, destino, stops: [], verified: false, fuente: SEED_SRC }));
+// Paradas sin coordenadas: se muestran en Admin para geolocalizarlas (clic en el mapa).
+const SEED_PENDING = [{ nombre: "Rutas 51 D y F, 55 todas, 2, 3, 4, 5, y 6", fuente: "https://mapy.com/en/?source=osm&id=1041631583" }];
+// ===== DATOS DEMO (FICTICIOS, solo para el prototipo académico) =====
+// Coordenadas aproximadas alrededor del centro de Santa Ana: NO son paradas ni recorridos reales.
+// Se pueden borrar desde Admin → "Borrar datos DEMO".
+const DEMO_STOPS = [
+ ["Centro", 13.9946, -89.5598], ["Mercado", 13.9968, -89.5575], ["Hospital", 13.9890, -89.5650], ["Terminal", 13.9990, -89.5520],
+ ["Metrocentro", 13.9840, -89.5590], ["UES", 13.9800, -89.5640], ["Altos del Palmar", 14.0020, -89.5700], ["Colonia IVU", 13.9900, -89.5480],
+].map(([n, lat, lng], i) => ({ id: "d_s" + i, name: "[DEMO] " + n, lat, lng, verified: false, demo: true }));
+const DEMO_ROUTES = [
+ ["DEMO-1", "Altos del Palmar", "Colonia IVU", [6, 1, 0, 3, 7]],
+ ["DEMO-2", "Hospital", "UES", [2, 0, 4, 5]],
+ ["DEMO-3", "Terminal", "Metrocentro", [3, 1, 0, 4]],
+].map(([name, origen, destino, ix], i) => ({ id: "d_r" + i, name, origen, destino, stops: ix.map(k => "d_s" + k), verified: false, fuente: "demo", demo: true }));
+const S = {
+  stops: Store.get("stops", []), routes: (x => x.length ? x : SEED_ROUTES)(Store.get("routes", [])),
+  favs: Store.get("favs", { stops: [], routes: [] }), reports: Store.get("reports", []),
+  pos: null, view: "home", arg: null, admin: false,
+};
+const save = () => ["stops", "routes", "favs", "reports"].forEach(k => Store.set(k, S[k]));
+const stopById = id => S.stops.find(s => s.id === id);
+const routesOfStop = id => S.routes.filter(r => r.stops.includes(id));
+const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const norm = t => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+
+/* ============ 3. GEO ============ */
+function dist(a, b) { // Haversine en metros
+  const R = 6371000, r = x => x * Math.PI / 180;
+  const dLat = r(b.lat - a.lat), dLng = r(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function locate(cb) {
+  if (!navigator.geolocation) return cb(false);
+  navigator.geolocation.getCurrentPosition(
+    p => { S.pos = { lat: p.coords.latitude, lng: p.coords.longitude }; cb(true); },
+    () => cb(false), { enableHighAccuracy: true, timeout: 8000 });
+}
+
+/* ============ 4. MAPA (Leaflet + OpenStreetMap, con fallback) ============ */
+let map, layer, userMarker, mapsOK = false;
+function mapFail(msg) {
+  mapsOK = false;
+  document.getElementById("map").classList.add("hidden");
+  const f = document.getElementById("mapfail"); f.classList.remove("hidden");
+  f.textContent = "🗺️ " + msg + " Puedes seguir usando listas, búsqueda y favoritos.";
+}
+function initMap() {
+  if (typeof L === "undefined") return mapFail("Mapa no disponible (sin conexión o librería no cargada).");
+  map = L.map("map").setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lng], 14);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap contributors" }).addTo(map);
+  layer = L.layerGroup().addTo(map);
+  // Admin: clic en el mapa para capturar coordenadas reales de una parada
+  map.on("click", e => {
+    if (S.view === "admin" && S.admin && window.sla) { sla.value = e.latlng.lat.toFixed(6); slo.value = e.latlng.lng.toFixed(6); }
+  });
+  mapsOK = true; refreshMap();
+}
+function drawStops(list) {
+  if (!mapsOK) return;
+  layer.clearLayers();
+  list.forEach(s => L.marker([s.lat, s.lng], { title: s.name }).addTo(layer).bindPopup(
+    `<b>${esc(s.name)}</b><br>Rutas: ${routesOfStop(s.id).map(r => esc(r.name)).join(", ") || "—"}<br><a href="#" onclick="go('stop','${s.id}');return false">Ver detalle</a>`));
+  if (list.length) map.fitBounds(list.map(s => [s.lat, s.lng]), { padding: [30, 30], maxZoom: 16 });
+}
+function drawRoute(r) { // Polyline entre paradas en orden (línea recta, no calle exacta)
+  if (!mapsOK || !r) return;
+  const pts = r.stops.map(stopById).filter(Boolean);
+  drawStops(pts);
+  if (pts.length > 1) L.polyline(pts.map(s => [s.lat, s.lng]), { color: "#6d28d9", weight: 4 }).addTo(layer);
+}
+function refreshMap() {
+  if (!mapsOK) return;
+  const show = ["home", "nearby", "stop", "route", "admin"].includes(S.view);
+  document.getElementById("mapbox").classList.toggle("hidden", !show);
+  if (!show) return;
+  setTimeout(() => map.invalidateSize(), 0);
+  if (S.view === "route") return drawRoute(S.routes.find(r => r.id === S.arg));
+  if (S.view === "stop") { const s = stopById(S.arg); return s && drawStops([s]); }
+  drawStops(S.stops);
+  if (userMarker) userMarker.remove();
+  if (S.pos) userMarker = L.circleMarker([S.pos.lat, S.pos.lng], { radius: 8, color: "#2563eb" }).addTo(map).bindPopup("Tú");
+}
+
+/* ============ 5. VISTAS ============ */
+const NAV = [["home", "🏠", "Inicio"], ["nearby", "📍", "Cercanas"], ["search", "🔎", "Rutas"], ["favs", "⭐", "Favoritos"], ["report", "⚠️", "Reportar"], ["admin", "🛠️", "Admin"]];
+function go(v, a) { S.view = v; S.arg = a ?? null; render(); scrollTo(0, 0); }
+const badge = v => v ? `<span class="text-green-700 text-xs">✔ verificado</span>` : `<span class="text-amber-600 text-xs">⏳ sin verificar</span>`;
+const empty = `<div class="card text-sm">Aún no hay paradas con coordenadas verificadas: las rutas cargadas solo traen origen y destino. Captura paradas reales en <b>Admin</b> haciendo clic en el mapa (o importa un JSON). La app no inventa información.</div>`;
+
+const stopCard = (s, extra = "") => `<div class="card flex justify-between items-center" onclick="go('stop','${s.id}')">
+  <div><b>${esc(s.name)}</b> ${badge(s.verified)}<div class="text-xs text-slate-500">${routesOfStop(s.id).length} ruta(s) ${extra}</div></div><span>›</span></div>`;
+const routeCard = r => `<div class="card flex justify-between items-center" onclick="go('route','${r.id}')">
+  <div><b>🚌 ${esc(r.name)}</b> ${badge(r.verified)}<div class="text-xs text-slate-500">${esc(r.origen || "")} → ${esc(r.destino || "")}</div></div><span>›</span></div>`;
+
+const Views = {
+  home() { // 4.1
+    return `<div class="flex gap-2"><input id="q" placeholder="¿A dónde vas? (destino)"><button class="btn" onclick="go('search',{d:q.value})">Ir</button></div>
+    <div class="flex gap-2"><button class="btn2 flex-1" onclick="centerGPS()">🎯 Mi ubicación</button>
+    <button class="btn2 flex-1" onclick="go('nearby')">📍 Cercanas</button>
+    <button class="btn2 flex-1" onclick="go('favs')">⭐ Favoritos</button></div>
+    ${S.stops.length ? "" : empty}`;
+  },
+  nearby() { // 4.2
+    let list = S.stops.slice(), note = "";
+    if (S.pos) { list.sort((a, b) => dist(S.pos, a) - dist(S.pos, b)); }
+    else {
+      const f = norm(S.arg?.f);
+      note = `<div class="card text-sm">GPS no disponible. Busca manualmente:<input id="mf" class="mt-2" value="${esc(S.arg?.f || "")}" oninput="go('nearby',{f:this.value})"></div>`;
+      if (f) list = list.filter(s => norm(s.name).includes(f));
+    }
+    return `<button class="btn" onclick="centerGPS(true)">Usar mi GPS</button>${note}
+      ${list.length ? list.map(s => stopCard(s, S.pos ? `· ${Math.round(dist(S.pos, s))} m` : "")).join("") : empty}`;
+  },
+  search() { // 4.3
+    const a = S.arg || {}, o = norm(a.o), d = norm(a.d);
+    const m = (e, t) => norm(e).includes(t);
+    const card = (r, extra) => `<div class="card" onclick="go('route','${r.id}')"><b>🚌 ${esc(r.name)}</b> ${badge(r.verified)}${extra}</div>`;
+    const ends = r => `<div class="text-sm">${esc(r.origen)} → ${esc(r.destino)}</div>`;
+    const out = [];
+    if (o && d) {
+      // 1) Por paradas con coordenadas (abordaje antes que descenso en el orden de la ruta)
+      const so = S.stops.filter(s => m(s.name, o)), sd = S.stops.filter(s => m(s.name, d));
+      S.routes.forEach(r => so.forEach(x => sd.forEach(y => {
+        const i = r.stops.indexOf(x.id), j = r.stops.indexOf(y.id);
+        if (i > -1 && j > i) out.push(card(r, `<div class="text-sm">Aborda en <b>${esc(x.name)}</b> → baja en <b>${esc(y.name)}</b></div>`));
+      })));
+      // 2) Por extremos publicados de la ruta (recorrido intermedio NO verificado)
+      S.routes.filter(r => (m(r.origen, o) && m(r.destino, d)) || (m(r.origen, d) && m(r.destino, o)))
+        .forEach(r => out.push(card(r, ends(r) + `<div class="text-xs text-amber-600">Coincide con los extremos; recorrido intermedio sin verificar.</div>`)));
+    } else if (o || d) { // un solo campo: rutas que tocan ese lugar en sus extremos
+      const t = o || d;
+      S.routes.filter(r => m(r.origen, t) || m(r.destino, t)).forEach(r => out.push(card(r, ends(r))));
+    }
+    const res = (o || d) ? (out.join("") || `<div class="card text-sm">Sin coincidencias en los datos cargados. (No se muestran transbordos inventados.)</div>`) : "";
+    return `<input id="o" placeholder="Origen" value="${esc(a.o || "")}"><input id="d" placeholder="Destino" value="${esc(a.d || "")}">
+      <button class="btn w-full" onclick="go('search',{o:o.value,d:d.value})">Buscar ruta</button>${res}`;
+  },
+  stop() { // 4.4
+    const s = stopById(S.arg); if (!s) return "No existe.";
+    const fav = S.favs.stops.includes(s.id);
+    return `<div class="card"><h2 class="text-lg font-bold">${esc(s.name)}</h2>${badge(s.verified)}
+      <div class="text-sm">Coordenadas: ${s.lat}, ${s.lng}</div>
+      <button class="btn2 mt-2" onclick="toggleFav('stops','${s.id}')">${fav ? "★ Quitar de favoritos" : "☆ Guardar en favoritos"}</button></div>
+      <h3 class="font-bold">Rutas que pasan</h3>${routesOfStop(s.id).map(routeCard).join("") || "<p class='text-sm'>Sin rutas asociadas.</p>"}`;
+  },
+  route() { // 4.4
+    const r = S.routes.find(x => x.id === S.arg); if (!r) return "No existe.";
+    const fav = S.favs.routes.includes(r.id), ss = r.stops.map(stopById).filter(Boolean);
+    return `<div class="card"><h2 class="text-lg font-bold">🚌 ${esc(r.name)}</h2>${badge(r.verified)}
+      <div class="text-sm mt-1">${esc(r.origen || "")} → ${esc(r.destino || "")}</div>
+      ${r.fuente && r.fuente.startsWith("http") ? `<a class="text-xs text-violet-700 underline" href="${esc(r.fuente)}" target="_blank" rel="noopener">Fuente de los datos</a>` : ""}
+      <div><button class="btn2 mt-2" onclick="toggleFav('routes','${r.id}')">${fav ? "★ Quitar de favoritos" : "☆ Guardar en favoritos"}</button></div></div>
+      <h3 class="font-bold">Paradas en orden</h3>${ss.map((s, i) => stopCard(s, `· #${i + 1}`)).join("") || "<p class='text-sm'>Aún no hay paradas con coordenadas para esta ruta; solo se conocen sus extremos.</p>"}`;
+  },
+  favs() { // 4.5 (todo viene de localStorage → funciona sin red)
+    const ss = S.favs.stops.map(stopById).filter(Boolean), rr = S.favs.routes.map(id => S.routes.find(r => r.id === id)).filter(Boolean);
+    return `<h2 class="font-bold">⭐ Paradas</h2>${ss.map(s => stopCard(s)).join("") || "<p class='text-sm'>Ninguna.</p>"}
+      <h2 class="font-bold">⭐ Rutas</h2>${rr.map(routeCard).join("") || "<p class='text-sm'>Ninguna.</p>"}`;
+  },
+  report() { // 4.6
+    return `<h2 class="font-bold">Reportar dato incorrecto</h2>
+      <select id="rt"><option>Parada incorrecta</option><option>Ruta desactualizada</option><option>Falta una parada</option><option>Otro</option></select>
+      <input id="rr" placeholder="Parada o ruta afectada"><textarea id="rd" rows="4" placeholder="Describe el error"></textarea>
+      <button class="btn w-full" onclick="sendReport()">Enviar reporte</button>`;
+  },
+  admin() { // 4.7
+    if (!S.admin) return `<div class="card"><b>Acceso admin (simulado)</b><input id="pin" type="password" class="my-2" placeholder="PIN">
+      <button class="btn" onclick="if(pin.value===ADMIN_PIN){S.admin=true;render()}else alert('PIN incorrecto')">Entrar</button></div>`;
+    return `<div class="card space-y-2"><b>➕ Nueva parada</b> <span class="text-xs text-slate-500">(haz clic en el mapa para tomar lat/lng)</span><input id="sn" placeholder="Nombre">
+      <div class="flex gap-2"><input id="sla" placeholder="Latitud"><input id="slo" placeholder="Longitud"></div>
+      <label class="text-sm"><input type="checkbox" id="sv" style="width:auto"> Verificada con fuente oficial</label>
+      <button class="btn" onclick="addStop()">Guardar parada</button></div>
+    <div class="card space-y-2"><b>➕ Nueva ruta</b><input id="rn" placeholder="Nombre / número de ruta"><input id="ro" placeholder="Origen"><input id="rx" placeholder="Destino">
+      <textarea id="rs" rows="3" placeholder="Paradas EN ORDEN, separadas por coma (opcional; nombres exactos)"></textarea>
+      <label class="text-sm"><input type="checkbox" id="rv" style="width:auto"> Verificada</label>
+      <button class="btn" onclick="addRoute()">Guardar ruta</button></div>
+    <div class="card text-sm"><b>📌 Paradas por geolocalizar</b>${SEED_PENDING.map(p => `<div>${esc(p.nombre)} · <a class="text-violet-700 underline" href="${esc(p.fuente)}" target="_blank" rel="noopener">fuente</a></div>`).join("")}</div>
+    <div class="card"><b>📥 Reportes (${S.reports.length})</b>${S.reports.map((r, i) => `<div class="text-sm border-t mt-2 pt-1">
+      <b>${esc(r.type)}</b> · ${esc(r.target)}<br>${esc(r.desc)} <button class="text-red-600" onclick="S.reports.splice(${i},1);save();render()">resolver</button></div>`).join("")}</div>
+    <div class="card space-y-2"><b>Datos (JSON)</b><textarea id="js" rows="4"></textarea>
+      <div class="flex gap-2"><button class="btn2" onclick="js.value=JSON.stringify({stops:S.stops,routes:S.routes})">Exportar</button>
+      <button class="btn2" onclick="importJSON()">Importar</button></div></div>
+    <div class="card"><button class="btn2 w-full" onclick="purgeDemo()">🧹 Borrar datos DEMO</button></div>
+    <div class="card"><b>Paradas cargadas</b>${S.stops.map(s => `<div class="text-sm flex justify-between">${esc(s.name)}
+      <button class="text-red-600" onclick="delStop('${s.id}')">borrar</button></div>`).join("")}</div>`;
+  },
+};
+
+/* ============ 6. ACCIONES ============ */
+function toggleFav(k, id) { const a = S.favs[k], i = a.indexOf(id); i > -1 ? a.splice(i, 1) : a.push(id); save(); render(); }
+function centerGPS(rerender) {
+  locate(ok => {
+    if (!ok) return alert("No se pudo obtener tu ubicación. Usa la búsqueda manual.");
+    if (mapsOK) map.setView([S.pos.lat, S.pos.lng], 16);
+    rerender ? render() : refreshMap();
+  });
+}
+function sendReport() {
+  if (!rd.value.trim()) return alert("Describe el error");
+  S.reports.push({ type: rt.value, target: rr.value, desc: rd.value, date: new Date().toISOString() });
+  save(); alert("¡Gracias! Reporte guardado."); go("home");
+}
+function addStop() {
+  const lat = parseFloat(sla.value), lng = parseFloat(slo.value);
+  if (!sn.value.trim() || isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return alert("Datos inválidos");
+  S.stops.push({ id: "s" + Date.now(), name: sn.value.trim(), lat, lng, verified: sv.checked }); save(); render();
+}
+function addRoute() {
+  const ids = rs.value.split(",").map(norm).filter(Boolean).map(n => S.stops.find(s => norm(s.name) === n)?.id);
+  if (!rn.value.trim() || !ro.value.trim() || !rx.value.trim() || ids.includes(undefined)) return alert("Completa nombre, origen y destino; las paradas (opcionales) deben existir");
+  S.routes.push({ id: "r" + Date.now(), name: rn.value.trim(), origen: ro.value.trim(), destino: rx.value.trim(), stops: ids, verified: rv.checked, fuente: "admin" }); save(); render();
+}
+function purgeDemo() {
+  S.stops = S.stops.filter(s => !s.demo); S.routes = S.routes.filter(r => !r.demo);
+  S.favs.stops = S.favs.stops.filter(id => stopById(id)); S.favs.routes = S.favs.routes.filter(id => S.routes.some(r => r.id === id));
+  save(); render();
+}
+function delStop(id) {
+  S.stops = S.stops.filter(s => s.id !== id);
+  S.routes.forEach(r => r.stops = r.stops.filter(x => x !== id)); save(); render();
+}
+function importJSON() {
+  try {
+    const d = JSON.parse(js.value);
+    if (!Array.isArray(d.stops) || !Array.isArray(d.routes)) throw 0;
+    S.stops = d.stops; S.routes = d.routes; save(); render();
+  } catch { alert("JSON inválido"); }
+}
+
+/* ============ 7. RENDER ============ */
+function render() {
+  const demoBanner = (S.stops.some(s => s.demo) || S.routes.some(r => r.demo))
+    ? `<div class="card text-xs bg-yellow-100">⚠️ Modo demostración: las paradas y rutas [DEMO] son ficticias (prototipo académico).</div>` : "";
+  document.getElementById("view").innerHTML = demoBanner + (Views[S.view] || Views.home)();
+  document.getElementById("nav").innerHTML = NAV.map(([v, i, l]) =>
+    `<button onclick="go('${v}')" class="${S.view === v ? "text-violet-700 font-bold" : "text-slate-500"}"><div class="text-lg">${i}</div>${l}</button>`).join("");
+  refreshMap();
+}
+// Carga única de datos demo (si se borran desde Admin, no vuelven a aparecer)
+if (!Store.get("demo_loaded", false)) { S.stops.push(...DEMO_STOPS); S.routes.push(...DEMO_ROUTES); Store.set("demo_loaded", true); save(); }
+render(); initMap();
+// Tip offline completo: añade un Service Worker que cachee este HTML (los favoritos ya viven en localStorage).
+</script>
+</body>
+</html>
